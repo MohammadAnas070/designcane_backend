@@ -1,66 +1,32 @@
 /**
  * DesignCane - Node backend (single file)
- *   POST /api/contact  -> validates the form, builds an HTML email, sends it via Gmail SMTP
+ *   POST /api/contact  -> validates the form and appends the inquiry to inquiry.txt
+ *   GET  /inquiries    -> EJS page listing all saved inquiries (password protected)
  *   GET  /api/health   -> simple status check
  *
  * Start:  npm install && npm start        (default http://localhost:3000)
- * Test SMTP login only:  npm run check-smtp
  */
 'use strict';
 
 try { require('dotenv').config(); } catch { /* env vars may come from the host (Render) */ }
 
+const fs = require('fs');
+const path = require('path');
+const crypto = require('crypto');
 const express = require('express');
 const cors = require('cors');
 const rateLimit = require('express-rate-limit');
-const nodemailer = require('nodemailer');
 
 /* ------------------------------ config ------------------------------ */
-const cfg = () => ({
-  host: process.env.SMTP_HOST || 'smtp.gmail.com',
-  port: Number(process.env.SMTP_PORT || 587),
-  user: process.env.SMTP_USER || 'designcane857@gmail.com',
-  pass: (process.env.SMTP_APP_PASSWORD || '').replace(/\s+/g, ''), // Google shows it with spaces
-  to: process.env.CONTACT_EMAIL || 'designcane857@gmail.com',
-});
-
-let transporter = null;
-function getTransporter() {
-  const c = cfg();
-  if (!c.user || !c.pass) return null;
-  if (!transporter) {
-    transporter = nodemailer.createTransport({
-      host: c.host,
-      port: c.port,
-      secure: false,     // port 587 = STARTTLS
-      requireTLS: true,  // refuse to send if STARTTLS cannot be negotiated
-      auth: { user: c.user, pass: c.pass },
-      connectionTimeout: 10000,
-      greetingTimeout: 10000,
-      socketTimeout: 20000,
-    });
-  }
-  return transporter;
-}
-
-async function verifySmtp() {
-  const t = getTransporter();
-  if (!t) { console.warn('[smtp] SMTP_APP_PASSWORD is not set. /api/contact will return 503.'); return false; }
-  try { await t.verify(); console.log('[smtp] Connection and login verified.'); return true; }
-  catch (e) {
-    console.error('[smtp] Verify failed:', e.code || '', e.message);
-    if (e.code === 'EAUTH') console.error('[smtp] Use a Gmail App Password (2-Step Verification on), not the normal password.');
-    return false;
-  }
-}
+const INQUIRY_FILE = process.env.INQUIRY_FILE || path.join(__dirname, 'inquiry.txt');
+const ADMIN_USER = process.env.ADMIN_USER || 'admin';
+const adminPassword = () => process.env.ADMIN_PASSWORD || '';
 
 /* ------------------------ validation / sanitising ------------------------ */
 const oneLine = (s, max) =>
   String(s ?? '').replace(/[\r\n\u2028\u2029]+/g, ' ').replace(/[\u0000-\u001f\u007f]/g, '').trim().slice(0, max);
 const multiLine = (s, max) =>
   String(s ?? '').replace(/\r\n?/g, '\n').replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, '').trim().slice(0, max);
-const esc = (s) =>
-  String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 
 const EMAIL_RE = /^[^\s@<>()",;:]+@[^\s@<>()",;:]+\.[A-Za-z]{2,}$/;
 const PHONE_RE = /^[+\d\s().-]{7,20}$/;
@@ -83,49 +49,37 @@ function validate(body) {
   return { ok: true, data: d };
 }
 
-/* ----------------------------- email template ----------------------------- */
-function renderHtml(d, meta) {
-  const row = (k, v) =>
-    `<tr><td style="padding:10px 0;width:120px;vertical-align:top;font:600 11px/1.4 Arial,sans-serif;letter-spacing:.12em;text-transform:uppercase;color:#7a7568">${k}</td><td style="padding:10px 0;font:15px/1.5 Arial,sans-serif;color:#292823">${v}</td></tr>`;
-  return `<!doctype html><html><body style="margin:0;padding:24px;background:#f3ede2">
-<table role="presentation" width="100%" cellspacing="0" cellpadding="0"><tr><td align="center">
-<table role="presentation" width="600" cellspacing="0" cellpadding="0" style="max-width:600px;width:100%;background:#fffdf8;border:1px solid #e4dccb;border-radius:4px">
-<tr><td style="background:#2f4a3a;padding:24px 32px;border-radius:4px 4px 0 0">
-  <div style="font:600 11px Arial,sans-serif;letter-spacing:.2em;text-transform:uppercase;color:#d9c9a8">Crafted By Cane</div>
-  <div style="font:600 24px Georgia,serif;color:#fffdf8;margin-top:6px">New website inquiry</div>
-</td></tr>
-<tr><td style="padding:24px 32px 8px">
-  <div style="display:inline-block;padding:4px 12px;background:#f3e3da;color:#8a4a30;border-radius:999px;font:600 12px Arial,sans-serif">${esc(d.kind)}</div>
-  <h2 style="margin:14px 0 6px;font:600 20px Georgia,serif;color:#292823">${esc(d.subject)}</h2>
-  <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="border-top:1px solid #e4dccb;margin-top:12px">
-    ${row('Name', esc(d.name))}
-    ${row('Email', `<a href="mailto:${esc(d.email)}" style="color:#b96f50">${esc(d.email)}</a>`)}
-    ${d.phone ? row('Phone', `<a href="tel:${esc(d.phone.replace(/[^+\d]/g, ''))}" style="color:#b96f50">${esc(d.phone)}</a>`) : ''}
-    ${row('Subject', esc(d.subject))}
-  </table>
-</td></tr>
-<tr><td style="padding:8px 32px 24px">
-  <div style="font:600 11px Arial,sans-serif;letter-spacing:.12em;text-transform:uppercase;color:#7a7568;margin-bottom:8px">Message</div>
-  <div style="padding:16px 18px;background:#f8f3e9;border-left:3px solid #b96f50;font:15px/1.65 Arial,sans-serif;color:#292823;white-space:pre-wrap">${esc(d.message)}</div>
-  <p style="margin:20px 0 0;font:13px Arial,sans-serif;color:#7a7568">Just hit <strong>Reply</strong> to answer ${esc(d.name)} directly.</p>
-</td></tr>
-<tr><td style="padding:14px 32px;border-top:1px solid #e4dccb;font:12px Arial,sans-serif;color:#9a9486">Received ${esc(meta.when)} &middot; IP ${esc(meta.ip)}</td></tr>
-</table></td></tr></table></body></html>`;
+/* ------------------------------ storage ------------------------------ */
+// inquiry.txt holds one JSON object per line (newest at the bottom).
+// Writes are queued so two simultaneous submissions can never interleave.
+let writeQueue = Promise.resolve();
+function saveInquiry(record) {
+  const line = JSON.stringify(record) + '\n';
+  const job = writeQueue.then(() => fs.promises.appendFile(INQUIRY_FILE, line, 'utf8'));
+  writeQueue = job.catch(() => {}); // keep the queue alive after a failure
+  return job; // the caller still sees the failure
 }
 
-function renderText(d) {
-  const lines = [`New website inquiry - ${d.kind}`, '', `Name: ${d.name}`, `Email: ${d.email}`];
-  if (d.phone) lines.push(`Phone: ${d.phone}`);
-  lines.push(`Subject: ${d.subject}`, '', d.message);
-  return lines.join('\n');
+async function readInquiries() {
+  let raw;
+  try { raw = await fs.promises.readFile(INQUIRY_FILE, 'utf8'); }
+  catch (e) { if (e.code === 'ENOENT') return []; throw e; }
+  const items = [];
+  for (const line of raw.split('\n')) {
+    if (!line.trim()) continue;
+    try { items.push(JSON.parse(line)); } catch { /* skip a damaged line */ }
+  }
+  return items.reverse(); // newest first
 }
 
 /* --------------------------------- app --------------------------------- */
 const app = express();
 app.disable('x-powered-by');
 app.set('trust proxy', 1); // correct client IP behind Render's proxy
+app.set('view engine', 'ejs');
+app.set('views', path.join(__dirname, 'views'));
 
-// Allow any frontend origin to call this API
+// Allow any frontend origin to call the API
 app.use('/api', cors({ origin: '*', methods: ['GET', 'POST'] }));
 
 const limiter = rateLimit({
@@ -137,45 +91,27 @@ const limiter = rateLimit({
     res.status(429).json({ ok: false, message: 'Too many messages from your connection. Please wait a few minutes and try again.' }),
 });
 
-app.get('/api/health', (_req, res) => res.json({ ok: true, smtpConfigured: Boolean(cfg().pass) }));
+app.get('/api/health', (_req, res) => res.json({ ok: true, viewerProtected: Boolean(adminPassword()) }));
 
 app.post('/api/contact', limiter, express.json({ limit: '20kb' }), async (req, res) => {
   try {
     const v = validate(req.body);
     if (!v.ok) return res.status(422).json({ ok: false, message: v.message });
-    const d = v.data;
 
-    const t = getTransporter();
-    if (!t) {
-      console.error('[contact] SMTP_APP_PASSWORD missing.');
-      return res.status(503).json({ ok: false, message: 'Our contact form is temporarily unavailable. Please message us on WhatsApp.' });
-    }
+    const record = {
+      id: crypto.randomUUID(),
+      createdAt: new Date().toISOString(),
+      ip: req.ip || 'unknown',
+      ...v.data,
+    };
 
-    const c = cfg();
-    const when = new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata', dateStyle: 'medium', timeStyle: 'short' }) + ' IST';
-
-    const info = await t.sendMail({
-      from: { name: 'Crafted By Cane Website', address: c.user }, // must be our own Gmail account
-      to: c.to,
-      replyTo: { name: d.name, address: d.email },                // visitor goes in replyTo, never in "from"
-      subject: `[${d.kind}] ${d.subject}`.slice(0, 200),
-      text: renderText(d),
-      html: renderHtml(d, { ip: req.ip || 'unknown', when }),
-    });
-
-    // Success only if the SMTP server accepted the recipient
-    const accepted = (info.accepted || []).map((a) => String(typeof a === 'string' ? a : a.address).toLowerCase());
-    if (!accepted.includes(c.to.toLowerCase())) {
-      console.error('[contact] Recipient not accepted', { accepted: info.accepted, rejected: info.rejected, response: info.response });
-      return res.status(502).json({ ok: false, message: 'We could not deliver your message. Please try again or message us on WhatsApp.' });
-    }
-
-    console.log('[contact] sent', info.messageId);
+    // Success only after the inquiry has been written to the file.
+    await saveInquiry(record);
+    console.log('[contact] saved', record.id);
     return res.status(200).json({ ok: true });
   } catch (err) {
-    if (err?.code === 'EAUTH') console.error('[contact] SMTP auth failed. Check SMTP_USER / SMTP_APP_PASSWORD.');
-    else console.error('[contact] send failed:', err?.code, err?.message);
-    return res.status(502).json({ ok: false, message: 'We could not send your message right now. Please try again shortly or message us on WhatsApp.' });
+    console.error('[contact] save failed:', err?.code, err?.message);
+    return res.status(500).json({ ok: false, message: 'We could not save your message right now. Please try again shortly or message us on WhatsApp.' });
   }
 });
 
@@ -187,14 +123,46 @@ app.use('/api', (err, _req, res, _next) => {
   return res.status(500).json({ ok: false, message: 'Something went wrong. Please try again.' });
 });
 
+/* ------------------------- inquiries page (EJS) ------------------------- */
+// Inquiries contain personal details, so the page asks for a password (HTTP Basic Auth).
+function requireAdmin(req, res, next) {
+  const expected = adminPassword();
+  if (!expected) {
+    return res.status(503).type('text').send('Set the ADMIN_PASSWORD environment variable to enable this page.');
+  }
+  const header = req.headers.authorization || '';
+  const [scheme, encoded] = header.split(' ');
+  if (scheme === 'Basic' && encoded) {
+    const decoded = Buffer.from(encoded, 'base64').toString('utf8');
+    const i = decoded.indexOf(':');
+    const user = decoded.slice(0, i);
+    const pass = decoded.slice(i + 1);
+    const hash = (s) => crypto.createHash('sha256').update(s).digest();
+    const ok = crypto.timingSafeEqual(hash(user), hash(ADMIN_USER)) & crypto.timingSafeEqual(hash(pass), hash(expected));
+    if (ok) return next();
+  }
+  res.set('WWW-Authenticate', 'Basic realm="DesignCane inquiries", charset="UTF-8"');
+  return res.status(401).type('text').send('Authentication required.');
+}
+
+app.get('/inquiries', requireAdmin, async (_req, res) => {
+  try {
+    const inquiries = await readInquiries();
+    res.set('Cache-Control', 'no-store');
+    res.render('inquiries', { inquiries, total: inquiries.length });
+  } catch (err) {
+    console.error('[inquiries] read failed:', err?.code, err?.message);
+    res.status(500).type('text').send('Could not read inquiries.');
+  }
+});
+
 /* --------------------------------- boot --------------------------------- */
-if (process.argv.includes('--check-smtp')) {
-  verifySmtp().then((ok) => process.exit(ok ? 0 : 1));
-} else if (require.main === module) {
+if (require.main === module) {
   const port = Number(process.env.PORT || 3000);
   app.listen(port, () => {
-    console.log(`[server] http://localhost:${port}  (CORS: *)`);
-    verifySmtp();
+    console.log(`[server] listening on port ${port} (CORS: *)`);
+    console.log(`[server] inquiries file: ${INQUIRY_FILE}`);
+    if (!adminPassword()) console.warn('[server] ADMIN_PASSWORD is not set. /inquiries is disabled.');
   });
 }
 
