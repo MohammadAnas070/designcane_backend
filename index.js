@@ -22,7 +22,6 @@ const cfg = () => ({
   user: process.env.SMTP_USER || 'designcane857@gmail.com',
   pass: (process.env.SMTP_APP_PASSWORD || '').replace(/\s+/g, ''), // Google shows it with spaces
   to: process.env.CONTACT_EMAIL || 'designcane857@gmail.com',
-  origins: (process.env.CORS_ORIGIN || 'http://localhost:4200').split(',').map((s) => s.trim()).filter(Boolean),
 });
 
 let transporter = null;
@@ -126,8 +125,8 @@ const app = express();
 app.disable('x-powered-by');
 app.set('trust proxy', 1); // correct client IP behind Render's proxy
 
-// Allow the Angular frontend (default http://localhost:4200) to call this API
-app.use('/api', cors({ origin: cfg().origins, methods: ['GET', 'POST'] }));
+// Allow any frontend origin to call this API
+app.use('/api', cors({ origin: '*', methods: ['GET', 'POST'] }));
 
 const limiter = rateLimit({
   windowMs: 15 * 60 * 1000,
@@ -194,7 +193,7 @@ if (process.argv.includes('--check-smtp')) {
 } else if (require.main === module) {
   const port = Number(process.env.PORT || 3000);
   app.listen(port, () => {
-    console.log(`[server] http://localhost:${port}  (CORS: ${cfg().origins.join(', ')})`);
+    console.log(`[server] http://localhost:${port}  (CORS: *)`);
     verifySmtp();
   });
 }
