@@ -149,7 +149,13 @@ app.get('/inquiries', requireAdmin, async (_req, res) => {
   try {
     const inquiries = await readInquiries();
     res.set('Cache-Control', 'no-store');
-    res.render('inquiries', { inquiries, total: inquiries.length });
+    res.render('inquiries', { inquiries, total: inquiries.length }, (err, html) => {
+      if (err) {
+        console.error('[inquiries] render failed:', err.message); // e.g. missing views/inquiries.ejs or ejs not installed
+        return res.status(500).type('text').send('Could not render the inquiries page. Check the server logs.');
+      }
+      return res.send(html);
+    });
   } catch (err) {
     console.error('[inquiries] read failed:', err?.code, err?.message);
     res.status(500).type('text').send('Could not read inquiries.');
