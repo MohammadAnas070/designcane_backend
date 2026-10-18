@@ -16,6 +16,7 @@ const crypto = require('crypto');
 const express = require('express');
 const cors = require('cors');
 const rateLimit = require('express-rate-limit');
+const ejs = require('ejs');
 
 /* ------------------------------ config ------------------------------ */
 const INQUIRY_FILE = process.env.INQUIRY_FILE || path.join(__dirname, 'inquiry.txt');
@@ -76,8 +77,6 @@ async function readInquiries() {
 const app = express();
 app.disable('x-powered-by');
 app.set('trust proxy', 1); // correct client IP behind Render's proxy
-app.set('view engine', 'ejs');
-app.set('views', path.join(__dirname, 'views'));
 
 // Allow any frontend origin to call the API
 app.use('/api', cors({ origin: '*', methods: ['GET', 'POST'] }));
@@ -145,22 +144,92 @@ function requireAdmin(req, res, next) {
   return res.status(401).type('text').send('Authentication required.');
 }
 
+// Uses views/inquiries.ejs when it exists; otherwise the built-in copy below, so the page works
+// even if the views folder was not deployed.
+const VIEW_FILE = path.join(__dirname, 'views', 'inquiries.ejs');
+async function loadTemplate() {
+  try { return await fs.promises.readFile(VIEW_FILE, 'utf8'); }
+  catch (e) { if (e.code === 'ENOENT') return DEFAULT_TEMPLATE; throw e; }
+}
+
 app.get('/inquiries', requireAdmin, async (_req, res) => {
   try {
-    const inquiries = await readInquiries();
+    const [inquiries, template] = await Promise.all([readInquiries(), loadTemplate()]);
+    const html = ejs.render(template, { inquiries, total: inquiries.length });
     res.set('Cache-Control', 'no-store');
-    res.render('inquiries', { inquiries, total: inquiries.length }, (err, html) => {
-      if (err) {
-        console.error('[inquiries] render failed:', err.message); // e.g. missing views/inquiries.ejs or ejs not installed
-        return res.status(500).type('text').send('Could not render the inquiries page. Check the server logs.');
-      }
-      return res.send(html);
-    });
+    res.type('html').send(html);
   } catch (err) {
-    console.error('[inquiries] read failed:', err?.code, err?.message);
-    res.status(500).type('text').send('Could not read inquiries.');
+    console.error('[inquiries] failed:', err?.code, err?.message);
+    res.status(500).type('text').send('Could not load the inquiries page. Check the server logs.');
   }
 });
+
+const DEFAULT_TEMPLATE = String.raw`<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex, nofollow">
+  <title>Inquiries | Crafted By Cane</title>
+  <style>
+    :root { --bg:#f3ede2; --card:#fffdf8; --line:#e4dccb; --ink:#292823; --muted:#7a7568; --forest:#2f4a3a; --accent:#b96f50; }
+    @media (prefers-color-scheme: dark) {
+      :root { --bg:#1d1f1b; --card:#262924; --line:#3a3e36; --ink:#ece7da; --muted:#a39d8d; --forest:#6f9a80; --accent:#e09274; }
+    }
+    * { box-sizing: border-box; }
+    body { margin:0; padding:24px 16px 48px; background:var(--bg); color:var(--ink); font:15px/1.6 Arial, sans-serif; }
+    .wrap { max-width:860px; margin:0 auto; }
+    header { display:flex; flex-wrap:wrap; justify-content:space-between; align-items:baseline; gap:8px; margin-bottom:20px; }
+    h1 { margin:0; font:600 28px Georgia, serif; color:var(--forest); }
+    .count { color:var(--muted); font-size:14px; }
+    .card { background:var(--card); border:1px solid var(--line); border-radius:6px; padding:18px 20px; margin-bottom:14px; }
+    .top { display:flex; flex-wrap:wrap; justify-content:space-between; gap:8px; align-items:center; }
+    .kind { display:inline-block; padding:2px 12px; border-radius:999px; background:var(--line); color:var(--accent); font-weight:600; font-size:12px; }
+    time { color:var(--muted); font-size:13px; }
+    h2 { margin:10px 0 8px; font:600 19px Georgia, serif; }
+    dl { display:grid; grid-template-columns:90px 1fr; gap:4px 12px; margin:0 0 12px; }
+    dt { color:var(--muted); font-size:11px; font-weight:600; letter-spacing:.12em; text-transform:uppercase; padding-top:3px; }
+    dd { margin:0; overflow-wrap:anywhere; }
+    a { color:var(--accent); }
+    .msg { margin:0; padding:12px 14px; border-left:3px solid var(--accent); background:var(--bg); white-space:pre-wrap; overflow-wrap:anywhere; }
+    .id { margin-top:10px; color:var(--muted); font-size:12px; }
+    .empty { text-align:center; color:var(--muted); padding:48px 16px; }
+  </style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>Inquiries</h1>
+    <span class="count"><%= total %> total &middot; newest first</span>
+  </header>
+
+  <% if (!inquiries.length) { %>
+    <div class="card empty">No inquiries yet.</div>
+  <% } %>
+
+  <% inquiries.forEach(function (q) {
+       var when = new Date(q.createdAt);
+       var shown = isNaN(when) ? q.createdAt : when.toLocaleString('en-IN', { timeZone: 'Asia/Kolkata', dateStyle: 'medium', timeStyle: 'medium' }) + ' IST';
+  %>
+    <article class="card">
+      <div class="top">
+        <span class="kind"><%= q.kind %></span>
+        <time datetime="<%= q.createdAt %>"><%= shown %></time>
+      </div>
+      <h2><%= q.subject %></h2>
+      <dl>
+        <dt>Name</dt><dd><%= q.name %></dd>
+        <dt>Email</dt><dd><a href="mailto:<%= q.email %>"><%= q.email %></a></dd>
+        <% if (q.phone) { %><dt>Phone</dt><dd><a href="tel:<%= String(q.phone).replace(/[^+\d]/g, '') %>"><%= q.phone %></a></dd><% } %>
+      </dl>
+      <p class="msg"><%= q.message %></p>
+      <div class="id">ID <%= q.id %> &middot; IP <%= q.ip %></div>
+    </article>
+  <% }) %>
+</div>
+</body>
+</html>
+`;
 
 /* --------------------------------- boot --------------------------------- */
 if (require.main === module) {

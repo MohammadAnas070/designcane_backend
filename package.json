@@ -4,7 +4,9 @@
   "private": true,
   "description": "DesignCane backend: saves contact-form inquiries to inquiry.txt and shows them on an EJS page.",
   "main": "index.js",
-  "scripts": { "start": "node index.js" },
+  "scripts": {
+    "start": "node index.js"
+  },
   "dependencies": {
     "cors": "^2.8.5",
     "dotenv": "^16.4.5",
@@ -12,5 +14,7 @@
     "express": "^4.21.2",
     "express-rate-limit": "^7.5.0"
   },
-  "engines": { "node": ">=18" }
+  "engines": {
+    "node": ">=18"
+  }
 }
